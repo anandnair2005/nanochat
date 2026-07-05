@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Restore durable generated nanochat artifacts from a restricted rclone root into
-# NANOCHAT_BASE_DIR. This is intended for prewarm/retry flows before H100 work.
+# NANOCHAT_BASE_DIR before training or retrying on a Vast host.
 # Do not use this for source-downloadable data such as ClimbMix, eval bundles,
 # Hugging Face datasets, word lists, or identity data.
 

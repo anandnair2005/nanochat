@@ -42,6 +42,14 @@ SYNC_INTERVAL_SECONDS="${NANOCHAT_SYNC_INTERVAL_SECONDS:-600}"
 DEST="${NANOCHAT_RUN_REMOTE:-$NANOCHAT_RCLONE_REMOTE/runs/$NANOCHAT_RUN_ID}"
 SHARED_DEST="${NANOCHAT_SHARED_REMOTE:-$NANOCHAT_RCLONE_REMOTE/shared-artifacts}"
 STOP_MARKER="$STATUS_DIR/gdrive_sync.STOP"
+RETAIN_CHECKPOINTS="${NANOCHAT_RETAIN_CHECKPOINTS:-3}"
+
+case "$RETAIN_CHECKPOINTS" in
+    ''|*[!0-9]*)
+        echo "ERROR: NANOCHAT_RETAIN_CHECKPOINTS must be a non-negative integer, got '$RETAIN_CHECKPOINTS'." >&2
+        exit 1
+        ;;
+esac
 
 mkdir -p "$LOG_DIR" "$STATUS_DIR"
 
@@ -53,6 +61,7 @@ echo "NANOCHAT_RUN_ID: $NANOCHAT_RUN_ID"
 echo "Destination: $DEST"
 echo "Shared destination: $SHARED_DEST"
 echo "Sync mode: $SYNC_MODE"
+echo "Retain checkpoints: $RETAIN_CHECKPOINTS"
 echo "Log file: $LOG_FILE"
 
 RCLONE_COPY_ARGS=(
@@ -88,6 +97,97 @@ copy_file_if_exists() {
     fi
 }
 
+checkpoint_steps_local() {
+    local checkpoint_dir="$1"
+    local file step
+    [ -d "$checkpoint_dir" ] || return 0
+    for file in "$checkpoint_dir"/model_*.pt; do
+        [ -e "$file" ] || continue
+        step="$(basename "$file")"
+        step="${step#model_}"
+        step="${step%.pt}"
+        printf '%s\n' "$step"
+    done | sort -n
+}
+
+checkpoint_steps_remote() {
+    local remote_dir="$1"
+    local file step
+    rclone lsf "$remote_dir" --include 'model_*.pt' 2>/dev/null | while read -r file; do
+        [ -n "$file" ] || continue
+        file="$(basename "$file")"
+        step="${file#model_}"
+        step="${step%.pt}"
+        printf '%s\n' "$step"
+    done | sort -n
+}
+
+prune_local_checkpoint_dir() {
+    local checkpoint_dir="$1"
+    local label="$2"
+    local steps count prune_count step
+    [ "$RETAIN_CHECKPOINTS" -gt 0 ] || return 0
+    steps="$(checkpoint_steps_local "$checkpoint_dir")"
+    [ -n "$steps" ] || return 0
+    count="$(printf '%s\n' "$steps" | wc -l | tr -d ' ')"
+    prune_count=$((count - RETAIN_CHECKPOINTS))
+    [ "$prune_count" -gt 0 ] || return 0
+    echo "Pruning local $label checkpoints in $checkpoint_dir to latest $RETAIN_CHECKPOINTS"
+    printf '%s\n' "$steps" | while read -r step; do
+        [ "$prune_count" -gt 0 ] || break
+        rm -f "$checkpoint_dir/model_${step}.pt" "$checkpoint_dir/meta_${step}.json" "$checkpoint_dir/optim_${step}_rank"*.pt
+        prune_count=$((prune_count - 1))
+    done
+}
+
+prune_remote_checkpoint_dir() {
+    local remote_dir="$1"
+    local label="$2"
+    local steps count prune_count step file
+    [ "$RETAIN_CHECKPOINTS" -gt 0 ] || return 0
+    if ! rclone lsjson "$remote_dir" --stat >/dev/null 2>&1; then
+        return 0
+    fi
+    steps="$(checkpoint_steps_remote "$remote_dir")"
+    [ -n "$steps" ] || return 0
+    count="$(printf '%s\n' "$steps" | wc -l | tr -d ' ')"
+    prune_count=$((count - RETAIN_CHECKPOINTS))
+    [ "$prune_count" -gt 0 ] || return 0
+    echo "Pruning remote $label checkpoints in $remote_dir to latest $RETAIN_CHECKPOINTS"
+    printf '%s\n' "$steps" | while read -r step; do
+        [ "$prune_count" -gt 0 ] || break
+        for file in "model_${step}.pt" "meta_${step}.json"; do
+            rclone deletefile "$remote_dir/$file" >/dev/null 2>&1 || true
+        done
+        rclone lsf "$remote_dir" --include "optim_${step}_rank*.pt" 2>/dev/null | while read -r file; do
+            [ -n "$file" ] || continue
+            rclone deletefile "$remote_dir/$file" >/dev/null 2>&1 || true
+        done
+        prune_count=$((prune_count - 1))
+    done
+}
+
+prune_checkpoint_tree() {
+    local local_root="$1"
+    local remote_root="$2"
+    local label="$3"
+    local dir tag
+    if [ -d "$local_root" ]; then
+        for dir in "$local_root"/*; do
+            [ -d "$dir" ] || continue
+            tag="$(basename "$dir")"
+            prune_local_checkpoint_dir "$dir" "$label/$tag"
+            prune_remote_checkpoint_dir "$remote_root/$tag" "$label/$tag"
+        done
+    elif rclone lsjson "$remote_root" --stat >/dev/null 2>&1; then
+        rclone lsf "$remote_root" --dirs-only 2>/dev/null | while read -r tag; do
+            [ -n "$tag" ] || continue
+            tag="${tag%/}"
+            prune_remote_checkpoint_dir "$remote_root/$tag" "$label/$tag"
+        done
+    fi
+}
+
 run_once() {
     date -u +"%Y-%m-%dT%H:%M:%SZ" > "$STATUS_DIR/gdrive_sync.LAST_START"
 
@@ -103,6 +203,10 @@ run_once() {
     date -u +"%Y-%m-%dT%H:%M:%SZ" > "$STATUS_DIR/gdrive_sync.LAST_DONE"
     copy_dir_if_exists "$NANOCHAT_BASE_DIR/status" "status"
     copy_dir_if_exists "$NANOCHAT_BASE_DIR/logs" "logs"
+
+    prune_checkpoint_tree "$NANOCHAT_BASE_DIR/base_checkpoints" "$DEST/base_checkpoints" "base_checkpoints"
+    prune_checkpoint_tree "$NANOCHAT_BASE_DIR/chatsft_checkpoints" "$DEST/chatsft_checkpoints" "chatsft_checkpoints"
+    prune_checkpoint_tree "$NANOCHAT_BASE_DIR/chatrl_checkpoints" "$DEST/chatrl_checkpoints" "chatrl_checkpoints"
 
     if [ "${NANOCHAT_SYNC_SHARED_ARTIFACTS:-0}" = "1" ]; then
         if [ -d "$NANOCHAT_BASE_DIR/tokenizer" ]; then

@@ -2,9 +2,8 @@
 
 """Local Vast.ai orchestrator for nanochat runs.
 
-This script intentionally keeps credentials local. It can create only the cheap
-prewarm instance; the H100 instance is expected to be created manually and is
-discovered later by polling the Vast account.
+This script intentionally keeps credentials local. Vast instances are expected
+to be created manually and are discovered later by polling the Vast account.
 """
 
 from __future__ import annotations
@@ -23,16 +22,11 @@ from typing import Any
 
 
 DEFAULT_IMAGE = "anandnair2005/nanochat-vast:h100"
-DEFAULT_PREWARM_IMAGE = "python:3.10-slim-bookworm"
 DEFAULT_RUN_ID = "d24"
 DEFAULT_RCLONE_REMOTE = "nanochat_gdrive_runner:"
 DEFAULT_MOUNT_PATH = "/workspace/nanochat-cache"
 DEFAULT_BASE_SAVE_EVERY = "200"
 DEFAULT_RETAIN_CHECKPOINTS = "3"
-DEFAULT_PREWARM_QUERY = (
-    "rentable=true verified=true num_gpus=1 reliability>0.95 inet_down>200 disk_space>40"
-)
-DEFAULT_VOLUME_QUERY = "verified=true disk_space>=150 inet_down>100 inet_up>100"
 
 
 def utc_now() -> str:
@@ -139,110 +133,6 @@ def rclone_config_file() -> Path:
     return ensure_file(str(Path.home() / ".config" / "rclone" / "rclone.conf"), "rclone config")
 
 
-def show_volumes() -> list[dict[str, Any]]:
-    data = vast_cmd("show", "volumes", raw=True)
-    return data if isinstance(data, list) else []
-
-
-def volume_size_gb(volume: dict[str, Any]) -> float | None:
-    for key in ("size", "volume_size", "disk_space", "allocated_size", "storage"):
-        value = volume.get(key)
-        if value is not None:
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                pass
-    return None
-
-
-def search_volume_offers(query: str, limit: int, storage_gb: int) -> list[dict[str, Any]]:
-    data = vast_cmd(
-        "search",
-        "volumes",
-        query,
-        "--limit",
-        str(limit),
-        "--storage",
-        str(storage_gb),
-        raw=True,
-    )
-    return data if isinstance(data, list) else []
-
-
-def effective_volume_query(args: argparse.Namespace) -> str:
-    if args.volume_query == DEFAULT_VOLUME_QUERY:
-        return f"verified=true disk_space>={args.storage_gb} inet_down>100 inet_up>100"
-    return args.volume_query
-
-
-def concise_volume_offer(offer: dict[str, Any]) -> dict[str, Any]:
-    keys = ["id", "disk_space", "storage_cost", "reliability", "inet_down", "inet_up", "geolocation", "machine_id"]
-    return {key: offer.get(key) for key in keys if key in offer}
-
-
-def create_volume(args: argparse.Namespace, manifest: dict[str, Any], manifest_path: Path) -> str:
-    offers = search_volume_offers(effective_volume_query(args), args.offer_limit, args.storage_gb)
-    if not offers:
-        raise RuntimeError("No Vast volume offers matched the query")
-    selected = offers[0]
-    print("Selected storage volume offer:")
-    print_json(concise_volume_offer(selected))
-
-    if args.dry_run:
-        add_event(manifest, "dry_run_volume_selected", offer=concise_volume_offer(selected), size_gb=args.storage_gb)
-        manifest.setdefault("resources", {})["storage_volume_id"] = "dry-run-volume"
-        manifest["resources"]["storage_volume_size_gb"] = args.storage_gb
-        save_manifest(manifest_path, manifest)
-        return "dry-run-volume"
-
-    if not args.yes:
-        answer = input(f"Create a {args.storage_gb} GB Vast storage volume? Type 'yes' to continue: ").strip()
-        if answer != "yes":
-            raise RuntimeError("User declined storage volume creation")
-
-    name = f"nanochat-{args.run_id}"
-    result = run_cmd(
-        ["vastai", "create", "volume", offer_id(selected), "--size", str(args.storage_gb), "--name", name, "--raw"],
-        raw=True,
-    )
-    new_id = str(result.get("new_contract") or result.get("id") or result.get("volume_id"))
-    if not new_id or new_id == "None":
-        raise RuntimeError(f"Could not parse created volume id from: {result}")
-    manifest.setdefault("resources", {})["storage_volume_id"] = new_id
-    manifest["resources"]["storage_volume_size_gb"] = args.storage_gb
-    add_event(manifest, "volume_created", volume_id=new_id, size_gb=args.storage_gb, offer=concise_volume_offer(selected))
-    save_manifest(manifest_path, manifest)
-    return new_id
-
-
-def ensure_volume(args: argparse.Namespace, manifest: dict[str, Any], manifest_path: Path) -> str:
-    volumes = show_volumes()
-    if len(volumes) > 1:
-        raise RuntimeError(f"Expected at most one Vast storage volume, found {len(volumes)}")
-    if len(volumes) == 0:
-        return create_volume(args, manifest, manifest_path)
-
-    volume = volumes[0]
-    size = volume_size_gb(volume)
-    if size is None:
-        raise RuntimeError(f"Could not determine existing Vast volume size from: {volume}")
-    if size < args.storage_gb:
-        raise RuntimeError(f"Existing Vast volume is {size:g} GB, smaller than required {args.storage_gb} GB")
-    vid = volume_id(volume)
-    manifest.setdefault("resources", {})["storage_volume_id"] = vid
-    manifest["resources"]["storage_volume_size_gb"] = size
-    add_event(manifest, "volume_reused", volume_id=vid, size_gb=size)
-    save_manifest(manifest_path, manifest)
-    return vid
-
-
-def volume_id(volume: dict[str, Any]) -> str:
-    for key in ("id", "volume_id", "contract_id"):
-        if key in volume and volume[key] is not None:
-            return str(volume[key])
-    raise RuntimeError(f"Could not determine volume id from: {volume}")
-
-
 def show_instances() -> list[dict[str, Any]]:
     data = vast_cmd("show", "instances", raw=True)
     return data if isinstance(data, list) else []
@@ -274,6 +164,12 @@ def is_h100(instance: dict[str, Any]) -> bool:
     return "h100" in text and (num_gpus == 0 or num_gpus >= 1 or "h100" in gpu_name)
 
 
+def matches_gpu_name(instance: dict[str, Any], gpu_name_filter: str) -> bool:
+    if not gpu_name_filter:
+        return True
+    return gpu_name_filter.lower() in json.dumps(instance).lower()
+
+
 def infer_instance_num_gpus(instance: dict[str, Any]) -> int | None:
     for key in ("num_gpus", "gpu_count", "gpus", "actual_num_gpus"):
         value = instance.get(key)
@@ -291,25 +187,11 @@ def infer_instance_num_gpus(instance: dict[str, Any]) -> int | None:
     return None
 
 
-def find_single_running_h100() -> dict[str, Any]:
-    matches = [inst for inst in show_instances() if is_running(inst) and is_h100(inst)]
+def find_single_running_instance(gpu_name_filter: str) -> dict[str, Any]:
+    matches = [inst for inst in show_instances() if is_running(inst) and matches_gpu_name(inst, gpu_name_filter)]
     if len(matches) != 1:
-        raise RuntimeError(f"Expected exactly one running H100 instance, found {len(matches)}")
+        raise RuntimeError(f"Expected exactly one running instance matching '{gpu_name_filter}', found {len(matches)}")
     return matches[0]
-
-
-def search_prewarm_offers(query: str, limit: int, storage_gb: int) -> list[dict[str, Any]]:
-    data = vast_cmd(
-        "search",
-        "offers",
-        query,
-        "--limit",
-        str(limit),
-        "--storage",
-        str(storage_gb),
-        raw=True,
-    )
-    return data if isinstance(data, list) else []
 
 
 def offer_id(offer: dict[str, Any]) -> str:
@@ -343,75 +225,6 @@ def env_arg(env: dict[str, str], ports: str = "-p 22:22") -> str:
     for key, value in env.items():
         parts.extend(["-e", f"{key}={value}"])
     return " ".join(shlex.quote(part) for part in parts)
-
-
-def create_prewarm_instance(args: argparse.Namespace, manifest: dict[str, Any], manifest_path: Path) -> str:
-    vid = ensure_volume(args, manifest, manifest_path)
-    offers = search_prewarm_offers(args.prewarm_query, args.offer_limit, args.storage_gb)
-    if not offers:
-        raise RuntimeError("No prewarm offers matched the query")
-    selected = offers[0]
-
-    print("Selected prewarm offer:")
-    print_json(concise_offer(selected))
-    print(f"Storage volume: {vid}")
-
-    if args.dry_run:
-        add_event(manifest, "dry_run_prewarm_selected", offer=concise_offer(selected), volume_id=vid)
-        manifest.setdefault("resources", {})["storage_volume_id"] = vid
-        save_manifest(manifest_path, manifest)
-        return "dry-run-prewarm"
-
-    if not args.yes:
-        answer = input("Create this paid prewarm instance? Type 'yes' to continue: ").strip()
-        if answer != "yes":
-            raise RuntimeError("User declined prewarm instance creation")
-
-    env = {
-        "NANOCHAT_RUN_ID": args.run_id,
-        "NANOCHAT_BASE_DIR": args.mount_path,
-        "NANOCHAT_RCLONE_REMOTE": args.rclone_remote,
-    }
-    onstart_cmd = (
-        "apt-get update && "
-        "apt-get install -y --no-install-recommends curl git openssh-client rclone rsync tmux && "
-        "mkdir -p /workspace && "
-        "rm -rf /var/lib/apt/lists/*"
-    )
-    cmd = [
-        "vastai",
-        "create",
-        "instance",
-        offer_id(selected),
-        "--image",
-        args.prewarm_image,
-        "--disk",
-        str(args.disk_gb),
-        "--link-volume",
-        vid,
-        "--mount-path",
-        args.mount_path,
-        "--label",
-        f"nanochat-{args.run_id}-prewarm",
-        "--ssh",
-        "--direct",
-        "--onstart-cmd",
-        onstart_cmd,
-        "--env",
-        env_arg(env, ports=""),
-    ]
-    result = run_cmd(cmd, raw=True)
-    new_id = str(result.get("new_contract") or result.get("id") or result.get("instance_id"))
-    if not new_id or new_id == "None":
-        raise RuntimeError(f"Could not parse created instance id from: {result}")
-    manifest.setdefault("resources", {})["storage_volume_id"] = vid
-    manifest["resources"]["prewarm_instance_id"] = new_id
-    add_event(manifest, "prewarm_created", instance_id=new_id, offer=concise_offer(selected))
-    save_manifest(manifest_path, manifest)
-    run_cmd(["vastai", "attach", "ssh", new_id, str(ensure_file(os.environ.get("NANOCHAT_SSH_PUBLIC_KEY_FILE"), "NANOCHAT_SSH_PUBLIC_KEY_FILE"))])
-    add_event(manifest, "ssh_key_attached", instance_id=new_id)
-    save_manifest(manifest_path, manifest)
-    return new_id
 
 
 def parse_ssh_url(output: str, user: str) -> tuple[str, int]:
@@ -571,37 +384,17 @@ def start_tmux(target: str, port: int, session: str, command: str, dry_run: bool
     ssh_run(target, port, remote, dry_run=dry_run)
 
 
-def start_prewarm(args: argparse.Namespace, instance_id_value: str, manifest: dict[str, Any], manifest_path: Path) -> None:
-    target, port = wait_for_ssh(instance_id_value, args.ssh_user, args.ssh_timeout, args.dry_run)
-    wait_for_remote_tools(target, port, ["curl", "rclone", "rsync", "tmux"], args.ssh_timeout, args.dry_run)
-    ssh_run(target, port, "mkdir -p /workspace/nanochat", dry_run=args.dry_run)
-    rsync_repo(target, port, "/workspace/nanochat", dry_run=args.dry_run)
-    inject_rclone(target, port, args.dry_run)
-    env = {
-        "NANOCHAT_BASE_DIR": args.mount_path,
-        "NANOCHAT_RUN_ID": args.run_id,
-        "NANOCHAT_RCLONE_REMOTE": args.rclone_remote,
-        "NANOCHAT_UV_EXTRA": "cpu",
-        "NANOCHAT_NUM_SHARDS": str(args.num_shards),
-    }
-    command = f"cd /workspace/nanochat && {env_exports(env)} bash runs/prewarm_vast.sh"
-    session = f"nanochat-prewarm-{args.run_id}"
-    start_tmux(target, port, session, command, args.dry_run)
-    add_event(manifest, "prewarm_tmux_started", instance_id=instance_id_value, session=session)
-    save_manifest(manifest_path, manifest)
-
-
-def launch_h100(args: argparse.Namespace, manifest: dict[str, Any], manifest_path: Path) -> None:
-    instance = find_single_running_h100()
+def launch_instance(args: argparse.Namespace, manifest: dict[str, Any], manifest_path: Path) -> None:
+    instance = find_single_running_instance(args.gpu_name)
     iid = instance_id(instance)
     num_gpus = args.num_gpus or infer_instance_num_gpus(instance)
     if num_gpus is None:
-        raise RuntimeError("Could not infer H100 GPU count from Vast instance; rerun with --num-gpus 4 or --num-gpus 8")
+        raise RuntimeError("Could not infer GPU count from Vast instance; rerun with --num-gpus N")
     if num_gpus < 1:
         raise RuntimeError(f"GPU count must be positive, got {num_gpus}")
-    manifest.setdefault("resources", {})["h100_instance_id"] = iid
-    manifest["resources"]["h100_num_gpus"] = num_gpus
-    add_event(manifest, "h100_discovered", instance_id=iid, num_gpus=num_gpus)
+    manifest.setdefault("resources", {})["instance_id"] = iid
+    manifest["resources"]["num_gpus"] = num_gpus
+    add_event(manifest, "instance_discovered", instance_id=iid, num_gpus=num_gpus, gpu_name_filter=args.gpu_name)
     save_manifest(manifest_path, manifest)
 
     target, port = wait_for_ssh(iid, args.ssh_user, args.ssh_timeout, args.dry_run)
@@ -614,15 +407,31 @@ def launch_h100(args: argparse.Namespace, manifest: dict[str, Any], manifest_pat
         "NANOCHAT_BASE_MODEL_TAG": args.run_id,
         "NANOCHAT_RCLONE_REMOTE": args.rclone_remote,
         "NANOCHAT_SKIP_UV_SYNC": "1",
-        "NANOCHAT_SKIP_DATASET": "1",
-        "NANOCHAT_SKIP_TOKENIZER": "1",
         "NANOCHAT_ENABLE_GDRIVE_SYNC": "1",
         "NANOCHAT_BASE_SAVE_EVERY": args.base_save_every,
         "NANOCHAT_RETAIN_CHECKPOINTS": args.retain_checkpoints,
         "NANOCHAT_NUM_GPUS": str(num_gpus),
         "NANOCHAT_DEVICE_BATCH_SIZE": str(args.device_batch_size),
         "NANOCHAT_ENABLE_FP8": "1" if args.fp8 else "0",
+        "NANOCHAT_DEPTH": str(args.depth),
+        "NANOCHAT_TARGET_PARAM_DATA_RATIO": str(args.target_param_data_ratio),
+        "NANOCHAT_DATASET_SHARDS": str(args.dataset_shards),
+        "NANOCHAT_DATASET_BOOTSTRAP_SHARDS": str(args.dataset_bootstrap_shards),
+        "NANOCHAT_RUN_BASE_EVAL": "1" if args.base_eval else "0",
+        "NANOCHAT_RUN_SFT": "1" if args.sft else "0",
+        "NANOCHAT_RUN_CHAT_EVAL": "1" if args.chat_eval else "0",
+        "NANOCHAT_RUN_REPORT": "1" if args.report else "0",
     }
+    optional_env = {
+        "NANOCHAT_MAX_SEQ_LEN": args.max_seq_len,
+        "NANOCHAT_TOTAL_BATCH_SIZE": args.total_batch_size,
+        "NANOCHAT_NUM_ITERATIONS": args.num_iterations,
+        "NANOCHAT_EVAL_TOKENS": args.eval_tokens,
+        "NANOCHAT_CORE_METRIC_EVERY": args.core_metric_every,
+    }
+    for key, value in optional_env.items():
+        if value is not None:
+            env[key] = str(value)
     if args.wandb and os.environ.get("WANDB_API_KEY"):
         env["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
     elif args.wandb:
@@ -631,7 +440,7 @@ def launch_h100(args: argparse.Namespace, manifest: dict[str, Any], manifest_pat
     command = f"cd /workspace/nanochat && {env_exports(env)} bash runs/speedrun_vast.sh"
     session = f"nanochat-{args.run_id}"
     start_tmux(target, port, session, command, args.dry_run)
-    add_event(manifest, "h100_tmux_started", instance_id=iid, session=session)
+    add_event(manifest, "speedrun_tmux_started", instance_id=iid, session=session)
     save_manifest(manifest_path, manifest)
 
 
@@ -639,14 +448,6 @@ def destroy_instance(iid: str, dry_run: bool) -> None:
     cmd = ["vastai", "destroy", "instance", iid]
     if dry_run:
         print("DRY-RUN destroy:", shlex.join(cmd))
-        return
-    run_cmd(cmd)
-
-
-def delete_volume(vid: str, dry_run: bool) -> None:
-    cmd = ["vastai", "delete", "volume", vid]
-    if dry_run:
-        print("DRY-RUN delete volume:", shlex.join(cmd))
         return
     run_cmd(cmd)
 
@@ -661,15 +462,11 @@ def cleanup(args: argparse.Namespace) -> None:
         if "final_sync_complete" not in events:
             raise RuntimeError("Refusing cleanup before final_sync_complete marker; use --force to override")
 
-    for key in ("prewarm_instance_id", "h100_instance_id"):
+    for key in ("instance_id", "h100_instance_id"):
         iid = resources.get(key)
         if iid:
             destroy_instance(str(iid), args.dry_run)
             add_event(manifest, "cleanup_destroy_instance", key=key, instance_id=iid, dry_run=args.dry_run)
-
-    if args.delete_volume and resources.get("storage_volume_id"):
-        delete_volume(str(resources["storage_volume_id"]), args.dry_run)
-        add_event(manifest, "cleanup_delete_volume", volume_id=resources["storage_volume_id"], dry_run=args.dry_run)
 
     save_manifest(manifest_path, manifest)
 
@@ -692,26 +489,62 @@ def build_parser() -> argparse.ArgumentParser:
 
     plan = sub.add_parser("plan", help="show local plan and write a manifest; no paid actions")
     common_args(plan)
-    plan.add_argument("--storage-gb", type=int, default=150)
 
-    prewarm = sub.add_parser("prewarm", help="create confirmed prewarm instance and start prewarm tmux job")
-    common_args(prewarm)
-    prewarm.add_argument("--prewarm-query", default=DEFAULT_PREWARM_QUERY)
-    prewarm.add_argument("--volume-query", default=DEFAULT_VOLUME_QUERY)
-    prewarm.add_argument("--prewarm-image", default=DEFAULT_PREWARM_IMAGE)
-    prewarm.add_argument("--offer-limit", type=int, default=5)
-    prewarm.add_argument("--storage-gb", type=int, default=150)
-    prewarm.add_argument("--disk-gb", type=int, default=40)
-    prewarm.add_argument("--num-shards", type=int, default=170)
+    launch = sub.add_parser("launch", help="discover one running Vast instance and start speedrun_vast.sh in tmux")
+    common_args(launch)
+    launch.add_argument("--gpu-name", default="H100", help="case-insensitive GPU filter for the running instance; use '' to match any")
+    launch.add_argument("--base-save-every", default=DEFAULT_BASE_SAVE_EVERY)
+    launch.add_argument("--retain-checkpoints", default=DEFAULT_RETAIN_CHECKPOINTS)
+    launch.add_argument("--num-gpus", type=int, default=None, help="override GPU count; otherwise infer from Vast instance metadata")
+    launch.add_argument("--depth", type=int, default=24)
+    launch.add_argument("--target-param-data-ratio", type=int, default=8)
+    launch.add_argument("--device-batch-size", type=int, default=16)
+    launch.add_argument("--dataset-shards", type=int, default=170)
+    launch.add_argument("--dataset-bootstrap-shards", type=int, default=8)
+    launch.add_argument("--max-seq-len", type=int, default=None)
+    launch.add_argument("--total-batch-size", type=int, default=None)
+    launch.add_argument("--num-iterations", type=int, default=None)
+    launch.add_argument("--eval-tokens", type=int, default=None)
+    launch.add_argument("--core-metric-every", type=int, default=None)
+    launch.add_argument("--fp8", dest="fp8", action="store_true", default=True)
+    launch.add_argument("--no-fp8", dest="fp8", action="store_false")
+    launch.add_argument("--base-eval", dest="base_eval", action="store_true", default=True)
+    launch.add_argument("--no-base-eval", dest="base_eval", action="store_false")
+    launch.add_argument("--sft", dest="sft", action="store_true", default=True)
+    launch.add_argument("--no-sft", dest="sft", action="store_false")
+    launch.add_argument("--chat-eval", dest="chat_eval", action="store_true", default=True)
+    launch.add_argument("--no-chat-eval", dest="chat_eval", action="store_false")
+    launch.add_argument("--report", dest="report", action="store_true", default=True)
+    launch.add_argument("--no-report", dest="report", action="store_false")
+    launch.add_argument("--wandb", dest="wandb", action="store_true", default=True)
+    launch.add_argument("--no-wandb", dest="wandb", action="store_false")
 
-    h100 = sub.add_parser("launch-h100", help="discover single running H100 and start speedrun tmux job")
+    h100 = sub.add_parser("launch-h100", help="backward-compatible alias for launch --gpu-name H100")
     common_args(h100)
+    h100.set_defaults(gpu_name="H100")
     h100.add_argument("--base-save-every", default=DEFAULT_BASE_SAVE_EVERY)
     h100.add_argument("--retain-checkpoints", default=DEFAULT_RETAIN_CHECKPOINTS)
-    h100.add_argument("--num-gpus", type=int, default=None, help="override H100 GPU count; otherwise infer from Vast instance metadata")
+    h100.add_argument("--num-gpus", type=int, default=None)
+    h100.add_argument("--depth", type=int, default=24)
+    h100.add_argument("--target-param-data-ratio", type=int, default=8)
     h100.add_argument("--device-batch-size", type=int, default=16)
+    h100.add_argument("--dataset-shards", type=int, default=170)
+    h100.add_argument("--dataset-bootstrap-shards", type=int, default=8)
+    h100.add_argument("--max-seq-len", type=int, default=None)
+    h100.add_argument("--total-batch-size", type=int, default=None)
+    h100.add_argument("--num-iterations", type=int, default=None)
+    h100.add_argument("--eval-tokens", type=int, default=None)
+    h100.add_argument("--core-metric-every", type=int, default=None)
     h100.add_argument("--fp8", dest="fp8", action="store_true", default=True)
     h100.add_argument("--no-fp8", dest="fp8", action="store_false")
+    h100.add_argument("--base-eval", dest="base_eval", action="store_true", default=True)
+    h100.add_argument("--no-base-eval", dest="base_eval", action="store_false")
+    h100.add_argument("--sft", dest="sft", action="store_true", default=True)
+    h100.add_argument("--no-sft", dest="sft", action="store_false")
+    h100.add_argument("--chat-eval", dest="chat_eval", action="store_true", default=True)
+    h100.add_argument("--no-chat-eval", dest="chat_eval", action="store_false")
+    h100.add_argument("--report", dest="report", action="store_true", default=True)
+    h100.add_argument("--no-report", dest="report", action="store_false")
     h100.add_argument("--wandb", dest="wandb", action="store_true", default=True)
     h100.add_argument("--no-wandb", dest="wandb", action="store_false")
 
@@ -719,7 +552,6 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup_parser.add_argument("--manifest", required=True)
     cleanup_parser.add_argument("--dry-run", action="store_true")
     cleanup_parser.add_argument("--force", action="store_true")
-    cleanup_parser.add_argument("--delete-volume", action="store_true")
     return parser
 
 
@@ -736,7 +568,6 @@ def do_plan(args: argparse.Namespace) -> None:
         {
             "run_id": args.run_id,
             "image": args.image,
-            "prewarm_image": getattr(args, "prewarm_image", DEFAULT_PREWARM_IMAGE),
             "mount_path": args.mount_path,
             "rclone_remote": args.rclone_remote,
             "dry_run": True,
@@ -750,14 +581,12 @@ def do_plan(args: argparse.Namespace) -> None:
         {
             "run_id": args.run_id,
             "image": args.image,
-            "prewarm_image": getattr(args, "prewarm_image", DEFAULT_PREWARM_IMAGE),
             "manifest": str(manifest_path),
             "mount_path": args.mount_path,
             "rclone_remote": args.rclone_remote,
-            "storage_gb": args.storage_gb,
             "ssh_public_key_file_configured": bool(public_key_file),
             "ssh_private_key_file_configured": bool(private_key),
-            "h100_creation": "manual; orchestrator only polls and launches tmux after it exists",
+            "instance_creation": "manual; orchestrator only polls and launches tmux after one matching instance exists",
         }
     )
 
@@ -779,12 +608,8 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "plan":
             do_plan(args)
-        elif args.command == "prewarm":
-            iid = create_prewarm_instance(args, manifest, manifest_path)
-            if iid != "dry-run-prewarm":
-                start_prewarm(args, iid, manifest, manifest_path)
-        elif args.command == "launch-h100":
-            launch_h100(args, manifest, manifest_path)
+        elif args.command in {"launch", "launch-h100"}:
+            launch_instance(args, manifest, manifest_path)
         else:
             parser.error(f"Unsupported command: {args.command}")
     except Exception as exc:  # noqa: BLE001 - CLI tool should emit concise failures

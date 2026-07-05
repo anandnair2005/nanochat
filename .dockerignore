@@ -1,0 +1,48 @@
+# Git and local metadata
+.git/
+.gitignore
+.DS_Store
+
+# Python/local virtualenvs and caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.uv-cache/
+
+# Environment files and secrets
+.env
+.env.*
+*.pem
+*.key
+*service-account*.json
+rclone.conf
+.netrc
+
+# Generated nanochat artifacts and caches
+base_data*/
+base_data_climbmix/
+tokenizer/
+base_checkpoints/
+chatsft_checkpoints/
+chatrl_checkpoints/
+eval_bundle/
+eval_bundle.zip
+hf_cache/
+words_alpha.txt
+identity_conversations.jsonl
+report.md
+report/
+wandb/
+
+# Runtime logs/manifests
+*.log
+.agents/runs/
+
+# OS/editor noise
+.idea/
+.vscode/
+*.swp
+*.swo

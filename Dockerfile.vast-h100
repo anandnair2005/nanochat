@@ -1,0 +1,73 @@
+# syntax=docker/dockerfile:1.7
+
+# H100/Vast image for nanochat speedruns. This image contains code and runtime
+# dependencies only. Do not bake datasets, checkpoints, rclone configs, wandb
+# credentials, Vast API keys, or other secrets into it.
+
+ARG DEPS_IMAGE=anandnair2005/nanochat-vast:deps-cu128
+
+FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04 AS deps-build
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PATH="/root/.local/bin:/workspace/nanochat/.venv/bin:${PATH}" \
+    UV_PROJECT_ENVIRONMENT="/workspace/nanochat/.venv"
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        htop \
+        iproute2 \
+        less \
+        nano \
+        openssh-server \
+        procps \
+        python3.10 \
+        python3.10-venv \
+        python3-pip \
+        rclone \
+        rsync \
+        screen \
+        tmux \
+        unzip \
+        vim-tiny \
+        wget \
+    && rm -f /etc/ssh/ssh_host_* \
+    && mkdir -p /var/run/sshd /workspace
+
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+WORKDIR /workspace/nanochat
+
+COPY pyproject.toml uv.lock .python-version /workspace/nanochat/
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --extra gpu --frozen --no-install-project \
+    && python -c "import torch; print(torch.__version__)" \
+    && command -v rclone \
+    && command -v tmux
+
+CMD ["sleep", "infinity"]
+
+FROM ${DEPS_IMAGE} AS deps
+
+WORKDIR /workspace/nanochat
+
+FROM deps AS app
+
+COPY . /workspace/nanochat
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --extra gpu --frozen \
+    && chmod +x runs/*.sh \
+    && rm -f /etc/ssh/ssh_host_*
+
+EXPOSE 22
+
+ENTRYPOINT ["/workspace/nanochat/runs/start_vast_container.sh"]
+CMD ["sleep", "infinity"]

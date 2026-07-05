@@ -270,8 +270,25 @@ def is_running(instance: dict[str, Any]) -> bool:
 def is_h100(instance: dict[str, Any]) -> bool:
     text = json.dumps(instance).lower()
     gpu_name = str(instance.get("gpu_name", "")).lower()
-    num_gpus = int(float(instance.get("num_gpus", instance.get("gpu_count", 0)) or 0))
+    num_gpus = infer_instance_num_gpus(instance) or 0
     return "h100" in text and (num_gpus == 0 or num_gpus >= 1 or "h100" in gpu_name)
+
+
+def infer_instance_num_gpus(instance: dict[str, Any]) -> int | None:
+    for key in ("num_gpus", "gpu_count", "gpus", "actual_num_gpus"):
+        value = instance.get(key)
+        if value is not None:
+            try:
+                count = int(float(value))
+            except (TypeError, ValueError):
+                continue
+            if count > 0:
+                return count
+    text = json.dumps(instance).lower()
+    match = re.search(r"(?:^|[^0-9])([148])\s*x\s*h100", text)
+    if match:
+        return int(match.group(1))
+    return None
 
 
 def find_single_running_h100() -> dict[str, Any]:
@@ -577,8 +594,14 @@ def start_prewarm(args: argparse.Namespace, instance_id_value: str, manifest: di
 def launch_h100(args: argparse.Namespace, manifest: dict[str, Any], manifest_path: Path) -> None:
     instance = find_single_running_h100()
     iid = instance_id(instance)
+    num_gpus = args.num_gpus or infer_instance_num_gpus(instance)
+    if num_gpus is None:
+        raise RuntimeError("Could not infer H100 GPU count from Vast instance; rerun with --num-gpus 4 or --num-gpus 8")
+    if num_gpus < 1:
+        raise RuntimeError(f"GPU count must be positive, got {num_gpus}")
     manifest.setdefault("resources", {})["h100_instance_id"] = iid
-    add_event(manifest, "h100_discovered", instance_id=iid)
+    manifest["resources"]["h100_num_gpus"] = num_gpus
+    add_event(manifest, "h100_discovered", instance_id=iid, num_gpus=num_gpus)
     save_manifest(manifest_path, manifest)
 
     target, port = wait_for_ssh(iid, args.ssh_user, args.ssh_timeout, args.dry_run)
@@ -596,6 +619,9 @@ def launch_h100(args: argparse.Namespace, manifest: dict[str, Any], manifest_pat
         "NANOCHAT_ENABLE_GDRIVE_SYNC": "1",
         "NANOCHAT_BASE_SAVE_EVERY": args.base_save_every,
         "NANOCHAT_RETAIN_CHECKPOINTS": args.retain_checkpoints,
+        "NANOCHAT_NUM_GPUS": str(num_gpus),
+        "NANOCHAT_DEVICE_BATCH_SIZE": str(args.device_batch_size),
+        "NANOCHAT_ENABLE_FP8": "1" if args.fp8 else "0",
     }
     if args.wandb and os.environ.get("WANDB_API_KEY"):
         env["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
@@ -682,6 +708,10 @@ def build_parser() -> argparse.ArgumentParser:
     common_args(h100)
     h100.add_argument("--base-save-every", default=DEFAULT_BASE_SAVE_EVERY)
     h100.add_argument("--retain-checkpoints", default=DEFAULT_RETAIN_CHECKPOINTS)
+    h100.add_argument("--num-gpus", type=int, default=None, help="override H100 GPU count; otherwise infer from Vast instance metadata")
+    h100.add_argument("--device-batch-size", type=int, default=16)
+    h100.add_argument("--fp8", dest="fp8", action="store_true", default=True)
+    h100.add_argument("--no-fp8", dest="fp8", action="store_false")
     h100.add_argument("--wandb", dest="wandb", action="store_true", default=True)
     h100.add_argument("--no-wandb", dest="wandb", action="store_false")
 

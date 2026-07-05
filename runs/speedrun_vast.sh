@@ -29,6 +29,28 @@ LOG_DIR="$NANOCHAT_BASE_DIR/logs"
 STATUS_DIR="$NANOCHAT_BASE_DIR/status"
 LOG_FILE="${NANOCHAT_LOG_FILE:-$LOG_DIR/speedrun.log}"
 SYNC_PID=""
+NUM_GPUS="${NANOCHAT_NUM_GPUS:-}"
+DEVICE_BATCH_SIZE="${NANOCHAT_DEVICE_BATCH_SIZE:-16}"
+ENABLE_FP8="${NANOCHAT_ENABLE_FP8:-1}"
+
+if [ -z "$NUM_GPUS" ]; then
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        NUM_GPUS="$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')"
+    else
+        NUM_GPUS="8"
+    fi
+fi
+
+case "$NUM_GPUS" in
+    ''|*[!0-9]*)
+        echo "ERROR: NANOCHAT_NUM_GPUS must be a positive integer, got '$NUM_GPUS'." >&2
+        exit 1
+        ;;
+esac
+if [ "$NUM_GPUS" -lt 1 ]; then
+    echo "ERROR: NANOCHAT_NUM_GPUS must be >= 1, got '$NUM_GPUS'." >&2
+    exit 1
+fi
 
 mkdir -p "$NANOCHAT_BASE_DIR" "$LOG_DIR" "$STATUS_DIR"
 rm -f "$STATUS_DIR/speedrun.DONE" "$STATUS_DIR/speedrun.FAILED"
@@ -127,6 +149,9 @@ echo "Repo root: $REPO_ROOT"
 echo "NANOCHAT_BASE_DIR: $NANOCHAT_BASE_DIR"
 echo "NANOCHAT_RUN_ID: $NANOCHAT_RUN_ID"
 echo "WANDB_RUN: $WANDB_RUN"
+echo "NANOCHAT_NUM_GPUS: $NUM_GPUS"
+echo "NANOCHAT_DEVICE_BATCH_SIZE: $DEVICE_BATCH_SIZE"
+echo "NANOCHAT_ENABLE_FP8: $ENABLE_FP8"
 echo "Log file: $LOG_FILE"
 
 # Validate prewarmed artifacts before any Python work when setup phases are skipped.
@@ -198,7 +223,10 @@ if [ "${NANOCHAT_RESUME_BASE_FROM_CHECKPOINT:-1}" = "1" ]; then
     BASE_RESUME_STEP="$(find_latest_base_step)"
 fi
 
-BASE_TRAIN_ARGS=(--depth=24 --target-param-data-ratio=8 --device-batch-size=16 --fp8 --run="$WANDB_RUN" --model-tag="$BASE_MODEL_TAG" --save-every="$BASE_SAVE_EVERY")
+BASE_TRAIN_ARGS=(--depth=24 --target-param-data-ratio=8 --device-batch-size="$DEVICE_BATCH_SIZE" --run="$WANDB_RUN" --model-tag="$BASE_MODEL_TAG" --save-every="$BASE_SAVE_EVERY")
+if [ "$ENABLE_FP8" = "1" ]; then
+    BASE_TRAIN_ARGS+=(--fp8)
+fi
 if [ -n "$BASE_RESUME_STEP" ]; then
     echo "Resuming base training from checkpoint step $BASE_RESUME_STEP"
     BASE_TRAIN_ARGS+=(--resume-from-step="$BASE_RESUME_STEP")
@@ -206,8 +234,8 @@ else
     echo "No base checkpoint found; starting base training from scratch"
 fi
 
-torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- "${BASE_TRAIN_ARGS[@]}"
-torchrun --standalone --nproc_per_node=8 -m scripts.base_eval -- --device-batch-size=16 --model-tag="$BASE_MODEL_TAG"
+torchrun --standalone --nproc_per_node="$NUM_GPUS" -m scripts.base_train -- "${BASE_TRAIN_ARGS[@]}"
+torchrun --standalone --nproc_per_node="$NUM_GPUS" -m scripts.base_eval -- --device-batch-size="$DEVICE_BATCH_SIZE" --model-tag="$BASE_MODEL_TAG"
 
 # -----------------------------------------------------------------------------
 # SFT
@@ -224,8 +252,8 @@ else
     curl -L -o "$IDENTITY_PATH" https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
 fi
 
-torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- --device-batch-size=16 --run="$WANDB_RUN" --model-tag="$BASE_MODEL_TAG"
-torchrun --standalone --nproc_per_node=8 -m scripts.chat_eval -- -i sft
+torchrun --standalone --nproc_per_node="$NUM_GPUS" -m scripts.chat_sft -- --device-batch-size="$DEVICE_BATCH_SIZE" --run="$WANDB_RUN" --model-tag="$BASE_MODEL_TAG"
+torchrun --standalone --nproc_per_node="$NUM_GPUS" -m scripts.chat_eval -- -i sft
 
 # -----------------------------------------------------------------------------
 # Generate the full report

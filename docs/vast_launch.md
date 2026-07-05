@@ -76,6 +76,13 @@ After the H100 instance is running, start training from the local machine:
 uv run python tasks/vast_orchestrate.py launch-h100 --run-id d24
 ```
 
+The orchestrator infers GPU count from Vast instance metadata and passes it as `NANOCHAT_NUM_GPUS`. If inference fails, pass it explicitly:
+
+```bash
+uv run python tasks/vast_orchestrate.py launch-h100 --run-id d24 --num-gpus 4
+uv run python tasks/vast_orchestrate.py launch-h100 --run-id d24 --num-gpus 8
+```
+
 The orchestrator will:
 
 - Find exactly one running H100 instance.
@@ -84,6 +91,7 @@ The orchestrator will:
 - Copy local rclone config to `/root/.config/rclone/rclone.conf` on the instance.
 - Pass `WANDB_API_KEY` from the local environment into the tmux command.
 - Start `runs/speedrun_vast.sh` in detached tmux session `nanochat-d24`.
+- Use `torchrun --nproc_per_node=$NANOCHAT_NUM_GPUS`, supporting both 4xH100 and 8xH100 runs.
 
 The H100 speedrun env includes:
 
@@ -97,6 +105,15 @@ The H100 speedrun env includes:
 - `NANOCHAT_SKIP_TOKENIZER=1`
 - `NANOCHAT_ENABLE_GDRIVE_SYNC=1`
 - `NANOCHAT_BASE_SAVE_EVERY=200`
+- `NANOCHAT_NUM_GPUS=<inferred-or-configured>`
+- `NANOCHAT_DEVICE_BATCH_SIZE=16`
+- `NANOCHAT_ENABLE_FP8=1`
+
+For cheap non-H100 smoke tests, use smaller overrides rather than editing scripts:
+
+```bash
+NANOCHAT_NUM_GPUS=1 NANOCHAT_DEVICE_BATCH_SIZE=1 NANOCHAT_ENABLE_FP8=0 bash runs/speedrun_vast.sh
+```
 
 Attach manually if needed:
 

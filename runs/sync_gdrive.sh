@@ -97,6 +97,28 @@ copy_file_if_exists() {
     fi
 }
 
+copy_logs_if_exists() {
+    local source_dir="$NANOCHAT_BASE_DIR/logs"
+    local snapshot_dir
+    if [ ! -d "$source_dir" ]; then
+        echo "Skipping missing directory $source_dir"
+        return 0
+    fi
+
+    snapshot_dir="$(mktemp -d "$NANOCHAT_BASE_DIR/.gdrive-log-snapshot.XXXXXX")"
+    if ! cp -a "$source_dir"/. "$snapshot_dir"/; then
+        rm -rf "$snapshot_dir"
+        return 1
+    fi
+
+    echo "Copying log snapshot $snapshot_dir -> $DEST/logs"
+    if ! rclone copy "$snapshot_dir" "$DEST/logs" "${RCLONE_COPY_ARGS[@]}"; then
+        rm -rf "$snapshot_dir"
+        return 1
+    fi
+    rm -rf "$snapshot_dir"
+}
+
 checkpoint_steps_local() {
     local checkpoint_dir="$1"
     local file step
@@ -202,7 +224,11 @@ run_once() {
 
     date -u +"%Y-%m-%dT%H:%M:%SZ" > "$STATUS_DIR/gdrive_sync.LAST_DONE"
     copy_dir_if_exists "$NANOCHAT_BASE_DIR/status" "status"
-    copy_dir_if_exists "$NANOCHAT_BASE_DIR/logs" "logs"
+    if [ "$SYNC_MODE" = "loop" ]; then
+        echo "Skipping logs during background sync loop; final sync copies logs."
+    else
+        copy_logs_if_exists
+    fi
 
     prune_checkpoint_tree "$NANOCHAT_BASE_DIR/base_checkpoints" "$DEST/base_checkpoints" "base_checkpoints"
     prune_checkpoint_tree "$NANOCHAT_BASE_DIR/chatsft_checkpoints" "$DEST/chatsft_checkpoints" "chatsft_checkpoints"

@@ -36,6 +36,10 @@ esac
 IMAGE="${IMAGE:-$DEFAULT_IMAGE}"
 BUILDER_ARGS=(--platform "$PLATFORM" --target "$TARGET" -f "$REPO_ROOT/Dockerfile.vast-h100" -t "$IMAGE")
 
+if [ "$TARGET" = "app" ]; then
+    BUILDER_ARGS+=(--build-arg "DEPS_IMAGE=${DEPS_IMAGE:-anandnair2005/nanochat-vast:deps-cu128}")
+fi
+
 if [ "${PUSH:-0}" = "1" ]; then
     BUILDER_ARGS+=(--push)
 elif [ "${LOAD:-1}" = "1" ]; then

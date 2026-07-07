@@ -39,7 +39,9 @@ wandb/
 
 # Runtime logs/manifests
 *.log
-.agents/runs/
+.agents/
+.claude/
+.opencode/
 
 # OS/editor noise
 .idea/

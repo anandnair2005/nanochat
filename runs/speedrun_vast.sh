@@ -268,8 +268,17 @@ fi
 if [ -n "${NANOCHAT_EVAL_TOKENS:-}" ]; then
     BASE_TRAIN_ARGS+=(--eval-tokens="$NANOCHAT_EVAL_TOKENS")
 fi
+if [ -n "${NANOCHAT_EVAL_EVERY:-}" ]; then
+    BASE_TRAIN_ARGS+=(--eval-every="$NANOCHAT_EVAL_EVERY")
+fi
 if [ -n "${NANOCHAT_CORE_METRIC_EVERY:-}" ]; then
     BASE_TRAIN_ARGS+=(--core-metric-every="$NANOCHAT_CORE_METRIC_EVERY")
+fi
+if [ -n "${NANOCHAT_SAMPLE_EVERY:-}" ]; then
+    BASE_TRAIN_ARGS+=(--sample-every="$NANOCHAT_SAMPLE_EVERY")
+fi
+if [ -n "${NANOCHAT_WINDOW_PATTERN:-}" ]; then
+    BASE_TRAIN_ARGS+=(--window-pattern="$NANOCHAT_WINDOW_PATTERN")
 fi
 if [ -n "$BASE_RESUME_STEP" ]; then
     echo "Resuming base training from checkpoint step $BASE_RESUME_STEP"
@@ -326,9 +335,8 @@ else
 fi
 
 stop_background_sync
-final_gdrive_sync
-
 date -u +"%Y-%m-%dT%H:%M:%SZ" > "$STATUS_DIR/speedrun.DONE"
+final_gdrive_sync
 trap - ERR
 
 echo

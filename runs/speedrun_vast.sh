@@ -23,7 +23,7 @@ fi
 
 export NANOCHAT_BASE_DIR
 export NANOCHAT_RUN_ID="${NANOCHAT_RUN_ID:-speedrun-$(date -u +%Y%m%dT%H%M%SZ)}"
-export WANDB_RUN="${WANDB_RUN:-dummy}"
+export WANDB_RUN="${WANDB_RUN:-${NANOCHAT_WANDB_RUN:-dummy}}"
 
 LOG_DIR="$NANOCHAT_BASE_DIR/logs"
 STATUS_DIR="$NANOCHAT_BASE_DIR/status"

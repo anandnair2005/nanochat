@@ -74,6 +74,7 @@ RCLONE_COPY_ARGS=(
     --exclude "words_alpha.txt"
     --exclude "identity_conversations.jsonl"
 )
+RCLONE_DELETE_ARGS=(--drive-use-trash=false)
 
 copy_dir_if_exists() {
     local source_dir="$1"
@@ -179,11 +180,11 @@ prune_remote_checkpoint_dir() {
     printf '%s\n' "$steps" | while read -r step; do
         [ "$prune_count" -gt 0 ] || break
         for file in "model_${step}.pt" "meta_${step}.json"; do
-            rclone deletefile "$remote_dir/$file" >/dev/null 2>&1 || true
+            rclone deletefile "$remote_dir/$file" "${RCLONE_DELETE_ARGS[@]}" >/dev/null 2>&1 || true
         done
         rclone lsf "$remote_dir" --include "optim_${step}_rank*.pt" 2>/dev/null | while read -r file; do
             [ -n "$file" ] || continue
-            rclone deletefile "$remote_dir/$file" >/dev/null 2>&1 || true
+            rclone deletefile "$remote_dir/$file" "${RCLONE_DELETE_ARGS[@]}" >/dev/null 2>&1 || true
         done
         prune_count=$((prune_count - 1))
     done

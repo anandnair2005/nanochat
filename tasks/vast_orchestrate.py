@@ -428,6 +428,7 @@ def launch_instance(args: argparse.Namespace, manifest: dict[str, Any], manifest
         "NANOCHAT_NUM_ITERATIONS": args.num_iterations,
         "NANOCHAT_EVAL_TOKENS": args.eval_tokens,
         "NANOCHAT_CORE_METRIC_EVERY": args.core_metric_every,
+        "NANOCHAT_LOG_EVERY": args.log_every,
     }
     for key, value in optional_env.items():
         if value is not None:
@@ -506,6 +507,7 @@ def build_parser() -> argparse.ArgumentParser:
     launch.add_argument("--num-iterations", type=int, default=None)
     launch.add_argument("--eval-tokens", type=int, default=None)
     launch.add_argument("--core-metric-every", type=int, default=None)
+    launch.add_argument("--log-every", type=int, default=None)
     launch.add_argument("--fp8", dest="fp8", action="store_true", default=True)
     launch.add_argument("--no-fp8", dest="fp8", action="store_false")
     launch.add_argument("--base-eval", dest="base_eval", action="store_true", default=True)
@@ -535,6 +537,7 @@ def build_parser() -> argparse.ArgumentParser:
     h100.add_argument("--num-iterations", type=int, default=None)
     h100.add_argument("--eval-tokens", type=int, default=None)
     h100.add_argument("--core-metric-every", type=int, default=None)
+    h100.add_argument("--log-every", type=int, default=None)
     h100.add_argument("--fp8", dest="fp8", action="store_true", default=True)
     h100.add_argument("--no-fp8", dest="fp8", action="store_false")
     h100.add_argument("--base-eval", dest="base_eval", action="store_true", default=True)

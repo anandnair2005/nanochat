@@ -277,6 +277,9 @@ fi
 if [ -n "${NANOCHAT_SAMPLE_EVERY:-}" ]; then
     BASE_TRAIN_ARGS+=(--sample-every="$NANOCHAT_SAMPLE_EVERY")
 fi
+if [ -n "${NANOCHAT_LOG_EVERY:-}" ]; then
+    BASE_TRAIN_ARGS+=(--log-every="$NANOCHAT_LOG_EVERY")
+fi
 if [ -n "${NANOCHAT_WINDOW_PATTERN:-}" ]; then
     BASE_TRAIN_ARGS+=(--window-pattern="$NANOCHAT_WINDOW_PATTERN")
 fi

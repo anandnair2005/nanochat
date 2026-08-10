@@ -12,3 +12,13 @@ eval_bundle/
 CLAUDE.md
 wandb/
 .agents/runs/
+.graphify/
+.serena/
+
+# OS artifacts
+.DS_Store
+
+# Non-project local files
+.playwright-mcp/
+DistributedTrainingLearning/
+chat_history.txt

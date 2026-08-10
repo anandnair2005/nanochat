@@ -44,3 +44,29 @@
 - There is no configured lint, formatter, typecheck, CI, or pre-commit in this checkout; verification is pytest plus the smallest relevant training/inference smoke command.
 - Keep changes minimal and compatible with the repo’s deliberately flat script-based design; avoid introducing framework-style config systems or broad abstractions.
 - README asks PR authors to disclose substantial LLM contribution they do not fully understand; preserve that expectation in contribution-facing edits.
+
+
+<!-- headroom:rtk-instructions -->
+# RTK (Rust Token Killer) - Token-Optimized Commands
+
+OpenCode has the RTK plugin installed globally. For ordinary shell commands,
+do **not** manually prefix with `rtk`; the plugin rewrites supported commands
+automatically before execution for token savings.
+
+## Manual RTK Usage
+
+Use explicit `rtk` only when you need a specific RTK mode, when running outside
+OpenCode, or when bypassing/filtering behavior intentionally.
+
+```bash
+rtk proxy <cmd>     # run without filtering but track usage
+rtk err <cmd>       # show only errors/warnings
+rtk summary <cmd>   # show heuristic summary
+rtk test <cmd>      # show test failures only
+```
+
+## Rules
+- Prefer normal commands in OpenCode, e.g. `git status`, `pytest`, `npm run build`.
+- For debugging RTK itself, use raw commands or `rtk proxy <cmd>` as appropriate.
+- The OpenCode plugin is global for this user and applies across repos on this host.
+<!-- /headroom:rtk-instructions -->

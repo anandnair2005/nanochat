@@ -1,91 +1,87 @@
-# NanoChat Speedrun, Part 2: Making H100s Go Brrrr On Vast.ai
+# NanoChat Speedrun, Part 2: Making The Expensive Part Boring
 
-Working subtitle: Docker, Google Drive artifacts, smoke tests, agent-assisted ops, failed H100 attempts, and the final 4xH100 NanoChat speedrun bill.
+*Docker, Vast.ai, Google Drive backups, smoke tests, H100 failures, and the final 4×H100 NanoChat run.*
 
-Draft status: rough working draft for Medium. This is the operational companion to Part 1. Keep TODOs until each claim has a source: code file, report, log, billing row, WandB screenshot, or personal note.
+![Cover Image (Replace with your image in Medium)](https://via.placeholder.com/800x400?text=Insert+Hero+Image+Here)
 
-## Opening
+> **Disclosure:** I used AI assistance to edit and refine this post, but the ideas, interpretations, and conclusions are mine.
 
-Part 1 was about reading NanoChat's code and understanding why I expected it to run well on a small H100 node. Part 2 is about what happened when that code met real rented GPUs.
+In Part 1, I walked through the NanoChat code path I cared about: the `--depth`-centered training recipe, the H100-specific attention and FP8 paths, the dataloader, the distributed optimizer, and the end-to-end speedrun script. That post was about why I expected NanoChat to be fast.
 
-The final result was the run ID `d24-4xh100-full`: a NanoChat speedrun on `4x NVIDIA H100 80GB HBM3`, with FP8 enabled, depth `24`, DDP world size `4`, and `5,838,471,168` base-training tokens.
+This post is about what happened when the code met rented GPUs.
 
-The final report showed:
+The final successful run was `d24-4xh100-full`: depth `24`, FP8 enabled, DDP world size `4`, `5,838,471,168` base-training tokens, and `4× NVIDIA H100 80GB HBM3` on Vast.ai.
 
-- Final validation bpb: `0.7194`.
+The generated report showed:
+
+- Validation bpb: `0.7194`.
 - CORE: `0.2561`.
 - ChatCORE: `0.3712`.
 - Base-training MFU: `59.79%`.
-- Base-training time: `196.49m`.
-- Total wall clock: `4h36m`.
+- Base-training time: `196.49m`, or about `3.27h`.
+- Total wall clock: `4h36m` in the report, and about `4h39.5m` from my own status markers.
 
-The Vast billing row most likely corresponding to the completed final run is instance `44510600`: `$41.161` total, including `$40.788` GPU cost for `4.779815` hours at `$8.533/hour`, plus disk and bandwidth. If I include all July 11 setup, smoke, failed, and final instance charges, the total was `$47.584`.
+The successful 4×H100 instance cost about `$41.16`. Including smoke tests and failed H100 attempts from the same day, the practical spend shown in the Vast.ai billing screenshot was about `$47.58`.
 
-That is the headline. But the useful lesson is not "click a cheap H100 and hope." The useful lesson is that before spending H100 money, I had to make the run boring: container startup, SSH, CUDA visibility, WandB, tokenizer restore, checkpoint sync, cleanup, and failure recovery all had to work before the expensive run started.
+![Vast.ai July 11 billing screenshot](evidence/part-2/VastAICharges.png)
 
-TODO: Decide final title. Candidate: `NanoChat Speedrun, Part 2: Making H100s Go Brrrr On Vast.ai`.
+*The successful 4×H100 run was roughly `$41.16`. Including smoke tests and failed attempts from the same day, the visible practical spend was roughly `$47.58`.*
 
-TODO: Add link back to Part 1 after publishing.
+That is the headline. But the real lesson was not "rent H100s and hope." The real lesson was that the expensive part only became reasonable after the boring parts were in place.
 
-TODO: Add final report link or excerpt from GDrive artifact `d24-4xh100-full/report.md`.
+And the practical way I got the boring parts done was agentic implementation. The resilience work mattered: Docker, secrets, restore paths, sync loops, smoke tests, status markers, and cleanup. But it was also exactly the kind of tedious, well-scoped engineering that can be reduced to careful instructions and handed to a coding agent. That let me spend more of my own attention on the questions I cared about: utilization, scaling, cost, and the final model.
 
-TODO: Add Vast billing screenshot/export citation for instance `44510600` and July 11 total.
+## What I Wanted To Learn
 
-## The Goal
+I had five questions going in.
 
-The goal was simple to state: run NanoChat's speedrun on rented H100s without turning the process into an expensive manual babysitting session.
+First: does NanoChat's code-level focus on GPU utilization translate into a real rented-GPU run? Part 1 made the code look very intentional: Flash Attention 3 on Hopper, FP8 linear layers, fixed-shape compilation, explicit batch math, BOS-aligned best-fit packing, and a distributed optimizer that does its own synchronization and optimizer-state sharding. But code reading is not the same as an H100 bill.
 
-More concretely, I wanted:
+Second: how good is `59.79%` MFU in practice? MFU is model FLOPs utilization: the fraction of theoretical peak compute the training run is turning into useful model math. In this part of the stack, `60%` MFU is extremely good. Something like `75%` would be walking on water. So I was not looking for a cute dashboard number. I was looking for evidence that the rented H100s were actually doing the thing I was paying them to do.
 
-- A Docker image that could run on Vast.ai.
-- No secrets baked into the image.
-- A way to restore useful generated artifacts on a fresh ephemeral instance.
-- A way to sync logs, checkpoints, reports, and status markers back while training.
-- A local orchestration script that an agent could use safely.
-- Cheap smoke tests before launching the real H100 job.
-- Enough evidence afterward to connect the report, logs, artifacts, and billing row.
+Third: does the end product clear the NanoChat target? NanoChat's benchmark is not "train a pretty loss curve." It is GPT-2-grade capability by its CORE target, followed by SFT and chat evaluation. I also wanted the qualitative version of that test: can I talk to the model afterward and feel like the pipeline produced an artifact, not just a report?
 
-The important constraint was that Vast instances are ephemeral. If a machine disappears, the durable state should not disappear with it.
+Fourth: how does the single-node path adapt below the reference 8×H100 shape? NanoChat's README reports an `8XH100` leaderboard time of `1.65` hours for the autoresearch round 2 run. I ran on 4 H100s. If the path is mostly GPU-bound and scales cleanly here, halving the GPU count should roughly double the base-training time.
 
-## Making NanoChat Runnable On Vast.ai
+That is almost exactly what happened: `196.49m`, or about `3.27h`, for 4 H100s compared with `1.65h` on 8 H100s. This is not a controlled scaling paper, but it is a strong practical sanity check. Half the GPUs, about twice the time.
 
-The Docker image is built from `Dockerfile.vast-h100` and pushed as `anandnair2005/nanochat-vast:h100`.
+Fifth: what does this cost now? Karpathy's original framing was GPT-2-class training under `$100`. H100s have become more available on rental markets, and NanoChat is optimized for exactly this class of machine. I wanted to know whether a careful on-demand run could stay below that psychological line without hiding the operational overhead.
 
-The image contains code and runtime dependencies, not run state. The Dockerfile explicitly documents the rule: do not bake datasets, checkpoints, rclone configs, WandB credentials, Vast API keys, or other secrets into the image.
+It did.
 
-Useful image properties:
+## The Agent Workflow
 
-- Python `3.10` environment.
-- GPU dependencies installed through `uv sync --extra gpu`.
-- `rclone` for Google Drive sync.
-- `tmux` for detached remote runs.
-- `openssh-server` so the orchestrator can connect to the container.
-- Repo code under `/workspace/nanochat`.
-- Entry point `runs/start_vast_container.sh`.
+There was another goal sitting underneath the H100 goal: I wanted to use coding agents as part of the engineering process, not just as autocomplete.
 
-The container's job is to start, expose SSH, and idle. Training starts only when the local orchestrator explicitly launches `runs/speedrun_vast.sh` inside `tmux`.
+My workflow was to create detailed implementation task files under [`.agents/tasks`](https://github.com/anandnair2005/nanochat/tree/feature/vast_speedrun/.agents/tasks). I wrote those task specs with LLM help, then handed them to a coding agent to execute while I was busy at work or asleep. The task files were deliberately concrete: objective, files to create or modify, required behavior, constraints, commands to run, acceptance criteria, and when to stop and ask.
 
-TODO: Verify whether the final pushed digest was `sha256:df2277b1fd9f506102b93eda8a460953f5bd8f8cd6ec0646abbd2e7bda2a6fa8` and cite source.
+That structure mattered. A vague prompt like "make NanoChat work on Vast" would have been too open-ended. A task like "create an H100 Docker image, exclude secrets and caches, build it locally, verify `torch`, `uv`, `rclone`, and `tmux`, then push the image" was something an agent could churn through autonomously.
 
-TODO: Read `runs/start_vast_container.sh` and describe the SSH/idling behavior accurately.
+This is where agentic workflows helped the most. Resilience and validation are important, but they are also boring. They require lots of small decisions, repeated checks, careful exclusions, and unglamorous scripts. A coding agent is very useful when that work is converted into a crisp spec. It can grind through the implementation, run the requested tests, report what passed, and leave me to review the result instead of personally typing every line of plumbing.
 
-TODO: Decide whether to include a short Dockerfile excerpt.
+The agent did a lot of the mechanical implementation this way: the Vast speedrun wrapper, Google Drive restore/sync scripts, the H100 Docker image, the container startup script, the launch documentation, and the first version of the local orchestrator. It was instructed to validate changes locally where possible, especially through shell syntax checks, temporary-directory smoke tests, and local Docker image checks. The local Docker setup was important because it let the agent verify the image contained the right tools and did not contain obvious secrets or generated artifacts before I spent money on cloud GPUs.
 
-## The Artifact Strategy: Generated State Only
+That changed the shape of the project. Instead of spending all my discretionary time on implementation plumbing, I could focus on the higher-level questions: is NanoChat actually keeping H100s busy, does 4×H100 behave like roughly half of 8×H100, what does the final bill look like, and does the resulting chat model feel real enough to be satisfying? The tedious implementation did not disappear, but it became mostly a queue of well-defined tasks.
 
-This was one of the most important operational decisions.
+The task list also shows a realistic agentic-coding lesson: plans diverge. The early tasks were completed and revised. Some later tasks remained marked pending because the actual coding and run experience moved faster than the original plan. I did not fully implement every planned guardrail, preflight runner, summary generator, or cleanup-verification abstraction before the successful run. Instead, the useful parts hardened through practice, and the rest became future cleanup work.
 
-I did not want to sync everything to Google Drive. Some artifacts are source-downloadable and should be recreated on the target host. Other artifacts are generated by my run and should be preserved.
+That was fine. The point of the task files was not to worship the plan. The point was to give the coding agent enough structure to make progress without constant supervision, while keeping secrets, paid actions, and destructive cleanup under human control. In that sense, the agentic workflow was not an extra flourish around the speedrun. It was part of why the speedrun was feasible to execute as a side project.
 
-Source-downloadable assets are intentionally not synced:
+## The Boring Stuff
 
-- ClimbMix parquet shards.
-- Eval bundles.
-- Hugging Face eval caches.
-- Word lists.
-- Identity data.
+The final run depended on a small amount of operational code on top of NanoChat. Much of this was produced through the task-file-plus-agent workflow above.
 
-Generated artifacts are synced:
+I used a Vast.ai Docker image defined in [`Dockerfile.vast-h100`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/Dockerfile.vast-h100). The rule for that image was simple: code and runtime tools belong in the image; secrets and generated state do not.
+
+The image installs Python `3.10`, GPU dependencies through `uv`, `rclone`, `rsync`, `tmux`, and `openssh-server`. It copies the repo into `/workspace/nanochat`, exposes SSH, and uses [`runs/start_vast_container.sh`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/runs/start_vast_container.sh) as the entrypoint.
+
+That entrypoint starts SSH, installs public keys from environment variables, disables password login, prints readiness information, and then idles by default. Training does not start merely because the container starts.
+
+That separation was important. Creating a Vast instance is a paid cloud action. Launching a speedrun is a separate training action. I wanted to inspect the machine, verify connectivity, copy local configuration, and then deliberately start training in a detached `tmux` session.
+
+The second boring piece was artifact policy. Vast instances are ephemeral. If a machine disappears, the useful generated state should not disappear with it. But I also did not want Google Drive to become a private mirror of everything NanoChat can already download.
+
+So [`runs/sync_gdrive.sh`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/runs/sync_gdrive.sh) syncs generated artifacts:
 
 - Tokenizer.
 - Base checkpoints.
@@ -95,311 +91,178 @@ Generated artifacts are synced:
 - Status markers.
 - Reports.
 
-This split made the run more reproducible and reduced the chance that I would accidentally use Google Drive as a giant dataset mirror.
+And it explicitly avoids source-downloadable state:
 
-The rclone remote was `nanochat_gdrive_runner:`. Shared artifacts live under `shared-artifacts`, while run-specific artifacts live under `runs/$NANOCHAT_RUN_ID`.
+- ClimbMix parquet shards.
+- Eval bundles.
+- Hugging Face caches.
+- Word lists.
+- Identity data.
 
-TODO: Cite `docs/rclone_gdrive_setup.md` for remote setup and `drive.file` scope.
+The matching restore path in [`runs/restore_gdrive.sh`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/runs/restore_gdrive.sh) restores the shared tokenizer and any run-specific checkpoints that exist, but it does not try to restore the world. Source data is downloaded again on the target host.
 
-TODO: Cite `runs/sync_gdrive.sh` for exclusions and retained artifact list.
+The third piece was a Vast-specific wrapper around the normal speedrun. NanoChat's main executable spine is still [`runs/speedrun.sh`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/runs/speedrun.sh). For the rented-GPU workflow, I added [`runs/speedrun_vast.sh`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/runs/speedrun_vast.sh).
 
-TODO: Cite `runs/restore_gdrive.sh` for tokenizer/checkpoint restore behavior.
+Its job is not glamorous. It sets a run ID, log directory, status directory, and base cache directory. It restores generated artifacts if available. It downloads ClimbMix if parquet shards are missing. It reuses a restored tokenizer when present. It resumes base pretraining from the latest checkpoint if one exists. It runs base eval, SFT, chat eval, and report generation. It marks success or failure with small status files. It runs Google Drive sync periodically and one final time at the end.
 
-## `speedrun_vast.sh`: A Vast-Friendly Pipeline
+This is the kind of code you write because you respect the fact that cloud machines fail.
 
-The normal repo spine is `runs/speedrun.sh`. For Vast, I added `runs/speedrun_vast.sh`.
+The last piece was local orchestration. [`tasks/vast_orchestrate.py`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/tasks/vast_orchestrate.py) keeps credentials local and assumes the paid Vast instance is created manually. The script then finds exactly one matching running instance, resolves SSH, waits for readiness, copies the local `rclone` config, rsyncs the repo while excluding secrets and caches, passes safe environment variables, and starts `runs/speedrun_vast.sh` in `tmux`.
 
-Its job is to run entirely on the target host:
+This was also the bridge between coding-agent implementation and agent-supervised execution. I made the paid decision to create and start the right instance. After that, the workflow was concrete enough that an agent could monitor logs and status markers, check that artifact sync completed, and stop the instance when the run was done. That mattered because the final run took hours; I did not want the whole process to depend on me staring at a terminal the entire time.
 
-- Require an explicit `NANOCHAT_BASE_DIR`, usually `/workspace/nanochat-cache`.
-- Set a run ID and log/status directories.
-- Start a background Google Drive sync loop if enabled.
-- Restore generated artifacts from Google Drive before deciding what to skip.
-- Download ClimbMix locally if parquet shards are missing.
-- Reuse an existing tokenizer if restored, otherwise train/evaluate one.
-- Resume base pretraining from the latest restored base checkpoint if present.
-- Run base eval, SFT, chat eval, and report depending on flags.
-- Run a final Google Drive sync on success or failure.
+I also wrote down the workflow in [`docs/vast_launch.md`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/docs/vast_launch.md) and the Google Drive remote setup in [`docs/rclone_gdrive_setup.md`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/docs/rclone_gdrive_setup.md). The docs are not decorative. They are part of making the run repeatable enough that I could hand the mechanical parts to an agent without asking it to improvise with credentials or rented GPUs.
 
-The important detail is that the script is resumable in the practical cloud sense. If an instance dies or a run is interrupted, the next target host can restore generated state and avoid starting from zero where possible.
+This is the boring stuff that makes exciting stuff cheap and reliable.
 
-TODO: Finish walking through lines after base train in `runs/speedrun_vast.sh`.
+## Smoke Tests
 
-TODO: Verify exact behavior for SFT reuse and final report generation.
+The smoke tests were not about model quality. They were about mechanics.
 
-TODO: Add status marker examples: `speedrun.STARTED`, `speedrun.DONE`, `speedrun.FAILED`, `gdrive_restore.DONE`.
+The local smoke test validated hardware-specific configuration and pipeline shape. My local GPU was not an H100, so trying to run the H100 path directly was the wrong test. FP8 and the Hopper attention path are hardware-specific. On local hardware, the right test was a tiny run with a smaller sequence length, no FP8, and a full-attention pattern that avoids the very inefficient non-Hopper sliding-window fallback.
 
-## The Local Orchestrator
+That kind of failure is useful. It taught me not to mistake "NanoChat supports H100 optimization" for "every development machine should run the same flags." Local smoke should validate mechanics: tokenizer training, dataset access, base training startup, eval plumbing, SFT continuation, chat eval, WandB logging, and report generation.
 
-The local orchestration script is `tasks/vast_orchestrate.py`.
+The cloud smoke tests validated a different layer: container startup, SSH, `rclone`, WandB, `tmux`, multi-GPU launch, and Google Drive sync. I used cheaper RTX 3060 Vast instances before spending H100 money. One short run finished end-to-end in about `8.25m`; a longer calibration run lasted about `22.47m` and produced enough signal to confirm the cloud mechanics were working.
 
-This script intentionally keeps credentials local. Vast instances are created manually, and the script discovers exactly one running matching instance later. That division of responsibility matters: selecting and paying for cloud GPUs stays an explicit human action, while the repeatable operational steps can be delegated.
+I would not use those RTX 3060 runs as H100 performance evidence. That was not their job. Their job was to catch the embarrassing failures before they happened on a more expensive machine.
 
-What the orchestrator does:
+The pre-run calibration also made the backup plan concrete. The final run's base checkpoint set ended up being about `9.283 GiB`: one model file around `4.23 GB`, one tiny metadata file, and four optimizer shards around `1.43 GB` each. The SFT checkpoint set was essentially the same size.
 
-- Loads local `.env` values.
-- Finds exactly one running Vast instance matching a GPU filter such as `H100` or `RTX 3060`.
-- Infers or accepts the GPU count.
-- Resolves the Vast SSH endpoint.
-- Waits for SSH readiness.
-- Copies local rclone config into the remote container.
-- Passes safe runtime environment variables into a detached `tmux` session.
-- Starts `bash runs/speedrun_vast.sh` remotely.
-- Writes a local manifest with events and resources.
-- Provides manifest-driven cleanup.
+Those file sizes come directly from NanoChat's checkpoint structure. [`nanochat/checkpoint_manager.py`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/nanochat/checkpoint_manager.py) saves one `model_<step>.pt` and metadata file from rank 0, while each rank saves its own `optim_<step>_rankN.pt` optimizer shard. [`scripts/base_train.py`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/scripts/base_train.py) and [`scripts/chat_sft.py`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/scripts/chat_sft.py) both use that checkpoint path. [`nanochat/optim.py`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/nanochat/optim.py) is doing ZeRO-2-style optimizer-state sharding for the distributed optimizer, so optimizer artifacts are large but split by rank.
 
-The defaults encode the final-run shape: Docker image `anandnair2005/nanochat-vast:h100`, base directory `/workspace/nanochat-cache`, rclone remote `nanochat_gdrive_runner:`, depth `24`, FP8 enabled by default, and `NANOCHAT_NUM_GPUS` inferred or overridden.
+This is where operational details stop being incidental. A "small" GPT-2-grade run still leaves behind multi-gigabyte checkpoint artifacts. If you want resumability and evidence, backup strategy is part of the training system.
 
-The agent-assisted part is not magic. The script made the run agent-friendly because the agent did not need to invent the workflow. It had a concrete local command, explicit flags, dry-run paths, manifests, and guardrails around secrets.
+## Production Still Blows Up
 
-TODO: Decide how much code from `tasks/vast_orchestrate.py` to quote.
+After the smoke tests, I still had failed H100 attempts.
 
-TODO: Cite the exact env vars passed into the remote tmux command.
+The most annoying failures were not training failures. They were connectivity failures. A cheaper H100 host appeared attractive, the instance came up, but direct SSH did not work the way my workflow expected. I tried the final-training shape and then a smaller H100 shape. Both failed for the same basic reason: I could not reliably reach the instance through the direct SSH path I had built around.
 
-TODO: Explain the cleanup safety check: refusing cleanup before `final_sync_complete` unless forced. Also verify whether final sync writes that event in the current code/path.
+Later, I learned that this path likely needed Vast's SSH proxy behavior rather than direct SSH.
 
-## Smoke Tests: The Preflight Ladder
+That is the kind of cloud tax that benchmark summaries do not show. The advertised GPU price is not the whole cost. If connectivity, startup mode, storage, or image behavior is flaky, the cheapest machine can become more expensive than the clean one.
 
-The cheap tests were not about proving model quality. They were about proving mechanics.
+The good news is that the failures were bounded. Because secrets were local, generated artifacts were backed up, and launches were explicit, the failed attempts did not turn into a confusing pile of half-state. They were annoying, not catastrophic.
 
-The framing I like is an aircraft preflight checklist. Before paying for H100 time, I wanted to know whether the basic things worked:
+## The Final Run
 
-- Does the container start?
-- Can I SSH into it?
-- Does the image have CUDA/PyTorch, `uv`, `rclone`, and `tmux`?
-- Are secrets absent from the image?
-- Does WandB logging work?
-- Can the tokenizer be restored from Google Drive?
-- Can generated artifacts sync back?
-- Does multi-rank `torchrun` work on a small multi-GPU instance?
-- Can cleanup happen without leaving paid resources running?
+The successful run was `d24-4xh100-full`.
 
-This section should be narrative, not a log dump.
+The status markers say the speedrun started at `2026-07-11T12:05:13Z` and finished at `2026-07-11T16:44:44Z`, about `4.66h`. The report's own wall-clock summary says `4h36m`. The difference is exactly the kind of small accounting gap I expect between report timing and outer orchestration markers.
 
-## Local RTX 3050 Lessons
+Operationally, this was the moment the agent workflow paid off. I kicked off the run, then let the agent take care of the boring vigilance: watching progress, checking completion status, confirming the final sync path, and stopping the paid instance after the artifacts were safe. That did not remove me from the loop; it moved me to the right part of the loop. I made the cost-bearing decisions, and the agent handled the repetitive monitoring.
 
-The local RTX 3050 laptop GPU was useful for validating mechanics, not final model quality.
+The Google Drive restore step took about `101s`. The restored shared tokenizer was available, so the run did not have to retrain it. Then the script downloaded the dataset shards it needed, initialized base training, detected `4× NVIDIA H100 80GB HBM3`, enabled FA3, and converted eligible linear layers to FP8.
 
-The first local attempt failed in a useful way. I tried a tiny depth-4 run with sequence length `2048`, `window_pattern=SSSL`, and FP8 enabled. FA3 was unavailable, SDPA warned that sliding-window attention would be inefficient, and Torch/Triton failed because `fp8e4nv` was unsupported on the RTX 3050.
+Base training was the main event:
 
-That failure taught the right lesson before I spent cloud money: FP8 and the H100 attention path are hardware-specific. A local smoke test needs to be shaped for local hardware.
-
-The corrected local run used:
-
-- Depth `4`.
-- Sequence length `512`.
-- `window_pattern=L`.
-- FP8 disabled.
-- `220` iterations.
-- Total batch size `512`.
-
-It completed successfully and validated tokenizer training, base eval, SFT continuation, chat eval, WandB logging, and report plumbing. The model quality was bad, which was expected. The goal was not quality; the goal was proving the pipeline could complete.
-
-TODO: Decide whether to include the WandB run ID `8lkud1vy`.
-
-TODO: Keep local MFU caveat: local base MFU was `0` because peak-FLOPS mapping was not meaningful for that path.
-
-## Small Vast.ai Runs
-
-The next level was a small real cloud test.
-
-The most useful small run was `d12-2x3060-es-ga-smoke` on Vast instance `44498015`:
-
-- GPU count: `2`.
-- GPU filter: `RTX 3060`.
-- Depth `12`.
-- Max sequence length `512`.
-- `110` iterations.
-- Total batch size `2048`.
-- DDP world size `2`.
-- Final/min validation bpb: `2.3658`.
-- Training time: `0.41m`.
-- Peak memory: `4616.01MiB`.
-
-Then there was a longer 15-minute calibration run, `d12-2x3060-es-15min-calib`, on the same instance:
-
-- `3600` iterations.
-- Final/min validation bpb: `1.7008`.
-- Training time: `14.76m`.
-- Peak memory: `4616.76MiB`.
-- Checkpoints retained at steps `1800` and `3600`.
-
-A WandB screenshot showed both RTX 3060 GPUs near `100%` utilization for nearly the entire calibration run, with one brief dip around minute 9-10. That was enough evidence to proceed to H100s.
-
-Important caveat: the smoke-run MFU values are not reliable exact performance evidence because peak-FLOPS mapping was missing for those GPUs. The smoke tests validated mechanics and gross utilization, not final H100 MFU.
-
-TODO: Add `Rtx3060SmokeTest.png` or recreate/export a Medium-friendly image.
-
-TODO: Cite GDrive run artifacts for both RTX 3060 runs.
-
-## Failed H100 Attempts
-
-This section should stay short. The point is the lesson, not every terminal detail.
-
-Between the RTX 3060 calibration and the successful final run, I tried cheaper H100 offerings in Japan. The instance came up and was running, but direct SSH did not work. I first tried an `8xH100` final-training launch, then a `4xH100` attempt on the same machine path. Both failed for the same direct-SSH reachability reason.
-
-Later, I retried the same Japan path and discovered it likely needed Vast SSH proxy access rather than direct SSH.
-
-The lesson is simple: cheaper advertised GPU price is not the whole cost. If connectivity, startup path, or instance setup is flaky, you can burn more time and money than the sticker price suggests.
-
-TODO: Verify likely mapping to instance IDs `44507275` and `44509679` before publishing.
-
-TODO: Decide whether to include exact failed-attempt costs or only the combined July 11 total.
-
-## The Final 4xH100 Run
-
-The successful final run was `d24-4xh100-full`.
-
-Known final-run facts:
-
-- Hardware: `4x NVIDIA H100 80GB HBM3`.
-- DDP world size: `4`.
-- FP8 enabled.
 - Depth: `24`.
-- Base-training iterations: `5,568`.
-- Base-training tokens: `5,838,471,168`.
-- Final validation bpb: `0.7194`.
-- CORE: `0.2561`.
-- ChatCORE: `0.3712`.
-- Base-training MFU: `59.79%`.
-- Base-training time: `196.49m`.
-- Total wall clock: `4h36m`.
+- Max sequence length: `2048`.
+- Window pattern: `SSSL`.
+- FP8: `True`, `tensorwise` recipe.
+- DDP world size: `4`.
+- Iterations: `5,568`.
+- Training tokens: `5,838,471,168`.
+- Validation bpb: `0.7194`.
+- MFU: `59.79%`.
+- Training time: `196.49m`.
 
-The log confirms `NANOCHAT_NUM_GPUS: 4`, final report generation, final Google Drive artifact sync, and `d24-4xh100-full` as the run ID.
+Then the pipeline ran base evaluation, SFT, chat evaluation, and report generation. The final report gave CORE `0.2561` and ChatCORE `0.3712`.
 
-TODO: Fill in the human experience: what I watched, what felt risky, what went smoothly, what surprised me.
+The timing breakdown tells the story:
 
-TODO: Add the exact final launch command if recoverable.
+- Restore and pretraining setup before base train: about `5m`, inferred from report/log timestamps.
+- Base pretraining: `196.49m`, the main GPU-bound stage.
+- Base eval: about `11m`.
+- SFT training: `19.63m` reported training time, about `27m` wall time including setup, evaluation, and checkpointing.
+- Chat eval: about `13m`.
+- Report completion to final status marker: about `2.8m`.
+- Final one-shot Google Drive sync confirmation: about `10s`, because the background sync loop had already copied the heavy artifacts.
 
-TODO: Add final report table or screenshot.
+The final remote folder contained exactly the kind of evidence trail I wanted: tokenizer, base checkpoints, SFT checkpoints, logs, status markers, report fragments, and `report.md`. The heavy artifacts were the two checkpoint sets, each about `9.283 GiB`. The non-checkpoint run contents were tiny by comparison: about `1.637 MiB`. The shared tokenizer was only about `532 KiB`.
 
-## Optional Profiler Follow-Up
+That split is useful to remember. Most of the backup weight is checkpoints. Logs and reports are cheap; optimizer state is not.
 
-A profiler run belongs here rather than in Part 1 because it is operational evidence: another paid cloud test, not part of the static code walkthrough.
+## Cost
 
-It would be useful, but only if I use it to answer a narrow question. The final H100 report already gives the main high-level performance evidence: wall-clock time, token throughput-derived training time, and MFU. A PyTorch profiler trace would not replace that. Its value would be substantiating the performance story with a lower-level view:
+The cost result was better than I expected.
 
-- Is the run mostly spending time in matmul/attention/optimizer kernels rather than Python or dataloading?
-- Is host-to-device copying visible as a meaningful bottleneck?
-- Are NCCL collectives or optimizer communication taking a surprising amount of time?
-- Does the data feeder claim from Part 1 hold up under a representative H100 trace?
+The successful 4×H100 instance cost about `$41.16`. That is the clean number for the completed speedrun instance. Including smoke tests and failed H100 attempts from the same day, the practical spend visible in the Vast.ai billing screenshot was about `$47.58`.
 
-The profiler is not free evidence. It can perturb timing, produce huge traces, and a local CPU/MPS/RTX 3050 profile would not substantiate claims about the H100 path. If I run it, I should run a short representative H100 slice, not the full speedrun, after warmup and with evaluation disabled.
+There are two ways to read that.
 
-I do not need to run a multi-hour speedrun just to get useful profiler evidence. A 15-30 minute paid H100 test is enough, but the actual active profiler window should be much shorter: warm up first, then capture only a small number of steady-state steps. Long traces become enormous and are harder to interpret.
+The optimistic reading is that NanoChat delivered on the spirit of the speedrun: GPT-2-grade training and SFT/chat evaluation on rented H100s for comfortably under `$100`.
 
-One claim needs special care. `nanochat/optim.py` documents a three-phase async communication pattern in `DistMuonAdamW`: launch async reductions, wait/update/launch gathers by group, then wait for gathers and copy back. In the current code, the model is not wrapped in PyTorch `DistributedDataParallel`, and I do not see backward hooks that launch gradient communication as each layer's gradient becomes ready. The gradients are synchronized by `DistMuonAdamW` inside `optimizer.step()`, after backward has produced local gradients. That supports a claim about overlapping communication with optimizer update work and with later group computation. It does not, by itself, prove DDP-style overlap where higher-layer gradient communication runs while lower layers are still computing backward gradients. To make that stronger backward-overlap claim, I would need either hook-based gradient communication in the code or a profiler trace showing NCCL collectives running concurrently with backward kernels.
+The more operational reading is that the overhead was small because I did not jump straight into the final run. The smoke tests and failed attempts cost money, but they were not runaway costs. The workflow had enough guardrails that failure stayed bounded.
 
-Suggested profiler shape:
+I would not claim future readers can reproduce the exact dollar figure. Vast pricing is transient. Availability changes. Host quality changes. The point is not that `$41.16` is a law of nature. The point is that, on this day, a careful on-demand 4×H100 NanoChat run landed far below the old `$100` target, even after including practical overhead.
 
-- Use a short depth/config close enough to the final path to exercise the same kernels.
-- Run on H100 if the claim is about H100 utilization.
-- Skip eval, sampling, checkpointing, and reporting.
-- Profile only a small active window after warmup.
-- Start with minimal profiler options: CUDA + CPU activities, no stack traces, no excessive shape/memory recording.
-- Report only a simple table or screenshot: top CUDA kernels, CPU overhead, HtoD copy time, NCCL time.
+## The Fun Part: Talking To It
 
-For overlap evidence specifically, Nsight Systems may be more useful than PyTorch Profiler because it shows CUDA streams, NCCL kernels, and kernel overlap visually. PyTorch Profiler is still useful for a top-down table and Chrome trace, but Nsight is the cleaner tool for showing whether communication overlaps with compute.
+Reports are useful, but the emotional payoff was opening the chat UI and talking to the model.
 
-TODO P1-025: Decide whether profiler evidence is worth another paid H100 smoke run. Moved from Part 1.
+I ran the SFT checkpoint locally through NanoChat's chat server in CPU mode. It was not fast, but it worked. The checkpoint produced a usable little chat model with the expected limits: GPT-2-grade capability, SFT behavior, occasional awkwardness, and a style that could become verbose or overconfident.
 
-TODO P1-026: If yes, add an opt-in profiler flag or small script rather than permanently complicating `scripts/base_train.py`. Moved from Part 1.
+![Chat sample with the trained NanoChat model](evidence/part-2/ChatSample.png)
 
-TODO P1-027: If no, say explicitly that Part 1 relies on code analysis plus final H100 report metrics, not a profiler trace. Moved from Part 1.
+*The satisfying part: after all the Docker, rclone, SSH, and H100 work, there was a model I could actually chat with.*
 
-TODO P1-028: If profiling communication overlap, add temporary NVTX/profiler ranges around backward, dataloader fetch, `optimizer.step()`, `DistMuonAdamW` phase 1 reductions, phase 2 update/gather launch, and phase 3 gather waits. Moved from Part 1.
+This was the first point where the run felt less like infrastructure and more like an artifact. A report says the model crossed a benchmark. A chat window makes the result tangible.
 
-## Cost Accounting
+The model was not secretly a modern frontier assistant. That was never the claim. But it responded coherently enough to feel like the fruits of the training run. It had personality in the small-model way: sometimes helpful, sometimes too wordy, sometimes strangely certain, but recognizably shaped by the SFT stage.
 
-The cleanest number is the Vast billing row most likely corresponding to the completed final run:
+NanoChat also contains RL code for special skills, especially GSM8K-style math through [`scripts/chat_rl.py`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/scripts/chat_rl.py). I did not run RL in this speedrun path, but it is an obvious next layer. Karpathy has discussed related RL directions in the NanoChat GitHub discussions, including [discussion 164](https://github.com/karpathy/nanochat/discussions/164) and [discussion 139](https://github.com/karpathy/nanochat/discussions/139).
 
-- Instance: `44510600`.
-- Total: `$41.161`.
-- GPU: `$40.788`.
-- Duration billed: `4.779815` hours.
-- GPU hourly rate: `$8.533/hour`.
-- Disk: `$0.362`.
-- Download bandwidth: `$0.004`.
-- Upload bandwidth: `$0.007`.
-- Lifecycle: created `2026-07-11T11:55:03Z`, destroyed `2026-07-11T16:48:14Z`, about `293.17` minutes.
+## A Small Tokenizer Joke
 
-The broader July 11 instance-charge total is `$47.584` across eight instance charge rows. That includes setup, smoke, failed, and final instance charges.
+One late-stage mistake produced the funniest failure of the whole process.
 
-I should present both numbers:
+At one point, I loaded the right checkpoint with the wrong tokenizer. The model produced complete gibberish.
 
-- `$41.16` for the successful final 4xH100 instance.
-- `$47.58` for the practical day-of-run cloud spend including related attempts.
+This is obvious in retrospect and still worth saying: a checkpoint and tokenizer are a matched artifact pair. The model's embedding table and output head are trained against a particular token vocabulary and merge ranking. If you swap in another tokenizer, the model is no longer seeing the symbols it was trained to understand.
 
-I should prefer Vast billing over the report's internal `$12.00/hour` hardware-rate field for cost claims.
+The amusing part is that the wrong tokenizer was not wildly different in intent. It came from another NanoChat run. But the merge ranks differed across tokenizer files, and that was enough. My practical takeaway is that tokenizer training should be treated as part of the run artifact, not as a generic dependency you can casually substitute.
 
-TODO: Add billing export/screenshot.
+There may also be a nondeterminism wrinkle here. BPE training can encounter frequency ties, and implementation details such as tie-breaking or unordered maps can make independently trained tokenizers differ even when the data and broad configuration are the same. I am not making a strong claim about the exact cause without a dedicated investigation. The operational rule is simpler: ship the tokenizer with the checkpoint.
 
-TODO: Explain why `44510600` is strongly mapped to the final run but terminated-instance metadata is not recoverable.
+## What This Proves
 
-TODO: Avoid implying future readers can always reproduce the same price; Vast pricing and availability are transient.
+This run proves a bounded thing.
 
-## Observations
+It proves that NanoChat's end-to-end speedrun can be made practical on rented 4×H100 infrastructure with modest glue code. It proves that the code path I studied in Part 1 does translate into a high-utilization run: `59.79%` MFU, roughly linear 4×H100 versus 8×H100 timing, and a complete report/eval/chat artifact trail. It proves that the operational wrapper mattered: Docker without secrets, restoreable generated artifacts, background sync, smoke tests, explicit orchestration, and agent-supervised monitoring kept the run from becoming expensive chaos.
 
-Draft observations:
+It does not prove which individual NanoChat optimization mattered most. It does not prove the same price will be available tomorrow. It does not prove Vast is always smooth. It does not turn this model into a frontier assistant.
 
-- The code was ready before the cloud workflow was ready.
-- The cheap preflight ladder was worth it.
-- The successful run was cheap partly because the expensive part was made boring.
-- Operational discipline matters as much as model code when renting ephemeral GPUs.
-- Google Drive artifact sync was not glamorous, but it changed the risk profile.
-- Agent-assisted ops worked because the workflow was explicit and credentials stayed local.
-- The final H100 report supports the utilization story, but smoke-test MFU should not be overused.
-- Cloud GPU costs should be reported with caveats: instance price, disk, bandwidth, failed attempts, and idle/debug time all matter.
+Those limits are important because they point to the next experiments.
 
-TODO: Turn these into prose after deciding the final narrative tone.
+## Future Work
 
-## What This Does Not Prove
+The obvious follow-up is optimization ablation. NanoChat combines many performance decisions: FA3, FP8, fixed shapes, batch-size scaling, optimizer sharding, and dataloader design. A proper ablation would disable or vary them one at a time and measure throughput, MFU, wall time, quality, and cost.
 
-This post should keep the claims bounded.
+Another follow-up is scaling-law validation. Part 1 explained NanoChat's `--depth`-derived hyperparameter strategy, but I did not independently validate the scaling rules. That would require a more systematic sweep.
 
-It does not prove:
+Profiler work also belongs in the future bucket. Profilers are useful when they answer a specific question: is time going to matmul, attention, optimizer communication, dataloading, or host-to-device transfer? They are less useful as general ceremony. If I profile this path, I would do it on a short H100 slice after warmup, not on a local CPU or non-Hopper run pretending to answer H100 questions.
 
-- That `$41` is the universal cost of running NanoChat.
-- That Vast.ai will offer the same price or hardware tomorrow.
-- That the failed H100 attempts are fully reconstructable from metadata.
-- That smoke-run MFU values are exact performance evidence.
-- Which NanoChat optimization mattered most.
-- That NanoChat is directly comparable to `modded-nanogpt` or other narrow pretraining speedrun targets.
+The other directions are more fun: implementing QJL or other KV-cache compression ideas, comparing NanoChat against the narrower GPT-2 pretraining target in [`modded-nanogpt`](https://github.com/KellerJordan/modded-nanogpt), and trying NanoChat's RL path for special skills.
 
-The right follow-up is an ablation: remove or disable specific optimizations, rerun comparable jobs, and measure the effect on throughput, MFU, wall clock, quality, and cost.
+## Closing
 
-## Future Posts
+Part 1 convinced me that NanoChat's code was built to keep H100s busy. Part 2 convinced me that the code could survive contact with rented GPUs if the operational runway was boring enough, and that agentic workflows are a good way to build that boring runway.
 
-Planned follow-ups:
+The final run was not heroic. That is why I liked it.
 
-- A NanoChat optimization ablation post: quantify which code optimizations matter most.
-- A post plus experiment validating the scaling-law-derived NanoChat hyperparameter choices.
-- A post about implementing QJL compression in NanoChat's KV cache.
-- A proper look at `modded-nanogpt` and how its special-case GPT-2 pretraining target differs from NanoChat's end-to-end pipeline.
+It restored what needed restoring, downloaded what should be downloaded, trained on 4 H100s, hit `59.79%` MFU, produced the expected reports and checkpoints, synced artifacts back to Google Drive, cost about `$41` for the successful instance, and left me with a small chat model I could actually talk to. The agentic part was not a side detail; it was how a lot of the implementation and long-running operational babysitting got done.
 
-## Evidence Checklist
+That is a pretty good outcome for a weekend-sized speedrun experiment.
 
-Attach sources before publishing:
+## References
 
-- `Dockerfile.vast-h100` for image contents and no-secrets rule.
-- `runs/start_vast_container.sh` for container startup behavior.
-- `docs/vast_launch.md` for workflow and orchestrator description.
-- `tasks/vast_orchestrate.py` for local launch, env vars, tmux, rclone injection, and cleanup.
-- `runs/speedrun_vast.sh` for restore/download/resume/sync behavior.
-- `runs/sync_gdrive.sh` for generated-artifact-only backup policy and checkpoint retention.
-- `runs/restore_gdrive.sh` for artifact restore behavior.
-- `docs/rclone_gdrive_setup.md` for remote setup and access-scope notes.
-- Local RTX 3050 reports/WandB for smoke-test details.
-- GDrive artifacts for `d12-2x3060-es-ga-smoke` and `d12-2x3060-es-15min-calib`.
-- WandB screenshot `Rtx3060SmokeTest.png`.
-- GDrive artifacts for `d24-4xh100-full/report.md` and `logs/speedrun.log`.
-- Vast billing export for July 11 and instance `44510600`.
-
-## Claims To Keep Careful
-
-- Say the final run was likely instance `44510600`; do not pretend terminated-instance metadata was recovered.
-- Distinguish `$41.16` final successful instance cost from `$47.58` practical day-of-run instance charges.
-- Do not claim exact GPU utilization from smoke-run MFU.
-- Do not overstate P4 smoke evidence; current evidence shows planning/dry-run/reused-volume activity, not a completed real P4 training run.
-- Do not imply the orchestrator fully automated safe cloud spending; H100 selection remained manual.
-- Do not publish secrets, private paths with credentials, or raw rclone config details.
+- Andrej Karpathy, [`nanochat`](https://github.com/karpathy/nanochat).
+- NanoChat README leaderboard, mirrored in this working branch: [`README.md`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/README.md).
+- Vast workflow code: [`Dockerfile.vast-h100`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/Dockerfile.vast-h100), [`runs/start_vast_container.sh`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/runs/start_vast_container.sh), [`runs/speedrun_vast.sh`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/runs/speedrun_vast.sh), [`runs/sync_gdrive.sh`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/runs/sync_gdrive.sh), [`runs/restore_gdrive.sh`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/runs/restore_gdrive.sh), and [`tasks/vast_orchestrate.py`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/tasks/vast_orchestrate.py).
+- Agent task instructions: [`.agents/tasks`](https://github.com/anandnair2005/nanochat/tree/feature/vast_speedrun/.agents/tasks).
+- Vast workflow docs: [`docs/vast_launch.md`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/docs/vast_launch.md) and [`docs/rclone_gdrive_setup.md`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/docs/rclone_gdrive_setup.md).
+- Checkpoint and optimizer code: [`nanochat/checkpoint_manager.py`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/nanochat/checkpoint_manager.py), [`nanochat/optim.py`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/nanochat/optim.py), [`scripts/base_train.py`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/scripts/base_train.py), and [`scripts/chat_sft.py`](https://github.com/anandnair2005/nanochat/blob/feature/vast_speedrun/scripts/chat_sft.py).
+- NanoChat RL discussions: [discussion 164](https://github.com/karpathy/nanochat/discussions/164) and [discussion 139](https://github.com/karpathy/nanochat/discussions/139).
+- Keller Jordan et al., [`modded-nanogpt`](https://github.com/KellerJordan/modded-nanogpt).

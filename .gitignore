@@ -2,7 +2,7 @@
 __pycache__/
 *.pyc
 dev-ignore/
-report.md
+/report.md
 eval_bundle/
 
 # Secrets
@@ -11,3 +11,14 @@ eval_bundle/
 # Local setup
 CLAUDE.md
 wandb/
+.agents/runs/
+.graphify/
+.serena/
+
+# OS artifacts
+.DS_Store
+
+# Non-project local files
+.playwright-mcp/
+DistributedTrainingLearning/
+chat_history.txt
